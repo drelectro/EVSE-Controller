@@ -31,7 +31,7 @@
 #define BACKLIGHT 1
 #define CP_IRQ   10
 #define CP_DRIVE 11
-#define CP_SENSE 8
+#define CP_SENSE 9
 #define PWR_ENABLE 13
 #define AUX_ENABLE 14
 
@@ -53,6 +53,7 @@ uint32_t cp_activeVoltageInt;
 bool cp_activeVoltageReady = false;
 float cp_activeVoltage;
 float cp_Voltage;
+float cp_statVoltage;
 
 const float cp_filterAlpha = 0.2;
 
@@ -92,13 +93,13 @@ static bool adc_calibration_init(void)
  * 
  */
 void IRAM_ATTR handlePwmStartInterrupt() {
-  digitalWrite(AUX_ENABLE, HIGH); 
+  //digitalWrite(AUX_ENABLE, HIGH); 
 
-  int adc_raw = adc1_get_raw(ADC1_CHANNEL_7);
+  int adc_raw = adc1_get_raw(ADC1_CHANNEL_8);
   cp_activeVoltageInt = esp_adc_cal_raw_to_voltage(adc_raw, &adc1_chars);
   cp_activeVoltageReady = true;
 
-  digitalWrite(AUX_ENABLE, LOW);
+  //digitalWrite(AUX_ENABLE, LOW);
 }
 
 void setup(void) {
@@ -131,7 +132,7 @@ void setup(void) {
   pinMode(CP_SENSE, INPUT);       // CP voltage monitor input
   cp_Voltage = 0;
   adc1_config_width(ADC_WIDTH_BIT_12);
-  adc1_config_channel_atten(ADC1_CHANNEL_7, ADC_ATTEN_DB_11);
+  adc1_config_channel_atten(ADC1_CHANNEL_8, ADC_ATTEN_DB_11);
   
   pinMode(PWR_ENABLE, OUTPUT);    // Charge power contactor drive
   digitalWrite(PWR_ENABLE, LOW);  
@@ -177,28 +178,36 @@ void handleApiGetStatus() {
 
 
   DynamicJsonDocument doc(256);
-/*
-  doc["voltage"] = String(runtimeState.last_v);
-  doc["current"] = String(runtimeState.last_i);
-  doc["wh"] = String(runtimeState.wh_accumulator/3600);
-  doc["mah"] = String(runtimeState.mah_accumulator/3600);
-  doc["seconds"] = String(runtimeState.last_seconds);
 
-  switch (runtimeState.system_state){
-    case _system_state::IDLE:
-      doc["system_state"] = String("IDLE");
+  doc["cpVoltage"] = String(cp_statVoltage);
+  doc["chargeRateStatus"] = "test1"; //String(runtimeState.last_i);
+  doc["pwmDutyCycleStatus"] = "test2"; //String(runtimeState.wh_accumulator/3600);
+
+  //enum class _cp_state {STANDBY, VEHICLE_DETECTED, CHARGE, VENT_CHARGE, NO_POWER, FAULT, UNKNOWN} cp_state;
+  switch (cp_state){
+    case _cp_state::STANDBY:
+      doc["system_state"] = String("STANDBY");
       break;
-    case _system_state::DISCHARGE_TEST:
-      doc["system_state"] = String("DISCHARGE_TEST");
+    case _cp_state::VEHICLE_DETECTED:
+      doc["system_state"] = String("VEHICLE_DETECTED");
       break;
-    case _system_state::TEST_COMPLETE:
-      doc["system_state"] = String("TEST_COMPLETE");
+    case _cp_state::CHARGE:
+      doc["system_state"] = String("CHARGE");
+      break;
+    case _cp_state::VENT_CHARGE:
+      doc["system_state"] = String("VENT_CHARGE");
+      break;
+    case _cp_state::NO_POWER:
+      doc["system_state"] = String("NO_POWER");
+      break;
+    case _cp_state::FAULT:
+      doc["system_state"] = String("FAULT");
       break;
     default:
       doc["system_state"] = String("UNKNOWN");
       break;
   }
-*/
+
 
   String jsonResponse;
   serializeJson(doc, jsonResponse);
@@ -206,39 +215,22 @@ void handleApiGetStatus() {
   webserver.send(200, "application/json", jsonResponse);
 }
 
-void handleApiStartLoad() {
-  String setpoint = webserver.arg("setpoint");
-  String cutoff = webserver.arg("cutoff");
-  
-  Serial0.printf("Start Load %s %s!\r\n", setpoint, cutoff);
-
-  //runtimeState.setPoint = (setpoint.toInt() * 1.308) + 79;
-  //runtimeState.setPoint_changed = true; 
-
-  //runtimeState.cut_out_voltage = cutoff.toFloat();
-    
-
-  //startStopDischargeMeasurement(true);
-  webserver.send(200, "application/json", "{\"status\": \"success\"}");
-}
-
-void handleApiStopLoad() {
-  Serial0.println("Stop Load!");
-  //startStopDischargeMeasurement(false);
-  webserver.send(200, "application/json", "{\"status\": \"success\"}");
-}
-
 void handleApiSetParameter(){
 
   for (uint8_t i = 0; i < webserver.args(); i++) {
     Serial0.printf("Set param: %s = %s \r\n", webserver.argName(i), webserver.arg(i));
+    //printf("Set param: %s = %s \r\n", webserver.argName(i), webserver.arg(i));
 
-    /*
-    if (webserver.argName(i) == "setpoint"){
-      runtimeState.setPoint = (webserver.arg(i).toInt() * 1.308) + 79;
-      runtimeState.setPoint_changed = true; 
+    
+    if (webserver.argName(i) == "supply"){
+
+      if (webserver.arg(i) == "MAIN")
+        digitalWrite(AUX_ENABLE, LOW); 
+      if (webserver.arg(i) == "AUX")
+        digitalWrite(AUX_ENABLE, HIGH); 
     }
 
+    /*
     if (webserver.argName(i) == "cutoff"){
       runtimeState.cut_out_voltage = webserver.arg(i).toFloat();
       lv_label_set_text_fmt(label_Lower_Status, "Low voltage cutoff = %.2f V", runtimeState.cut_out_voltage);
@@ -274,8 +266,6 @@ void do_WiFi()
     case _wifi_state::CONNECTED:
       webserver.on("/", handleRoot); // Set the root request handler
       webserver.on("/api/getStatus", handleApiGetStatus); // Set the API request handler
-      webserver.on("/api/startLoad", handleApiStartLoad);
-      webserver.on("/api/stopLoad", handleApiStopLoad);
       webserver.on("/api/setParameter", handleApiSetParameter);
       webserver.begin(); // Start the server
 
@@ -310,7 +300,7 @@ bool get_cp_state()
   //cp_Voltage = cp_filterAlpha * (float)analogReadMilliVolts(CP_SENSE) +
   //                    (1 - cp_filterAlpha) * cp_Voltage;
 
-  int adc_raw = adc1_get_raw(ADC1_CHANNEL_7);
+  int adc_raw = adc1_get_raw(ADC1_CHANNEL_8);
   cp_Voltage = (float)esp_adc_cal_raw_to_voltage(adc_raw, &adc1_chars);
 
   if (cp_activeVoltageReady){
@@ -338,6 +328,8 @@ bool get_cp_state()
   else
     v = cp_Voltage;
 
+  cp_statVoltage = v;
+
   tft.setCursor(0, 40, 4);
   tft.printf("CP = %.0f   \r\n", v);
 
@@ -357,7 +349,7 @@ bool get_cp_state()
     if (cp_state != _cp_state::STANDBY){
       state_changed = true;
       cp_state = _cp_state::STANDBY;
-      tft.printf("Standby         ");
+      tft.printf("Standby                  ");
     }
   }
 
@@ -417,20 +409,22 @@ void loop()
   long now = millis();
 
   if (get_cp_state()){
-    printf("CP State changed to %d\r\n", cp_state);
+    Serial0.printf("CP State changed to %d\r\n", cp_state);
 
     switch (cp_state)
     {
     case _cp_state::CHARGE:
       tft.setCursor(0, 40, 4);
-      tft.printf("\r\nCharging !                     ");
+      tft.printf("\r\nCharging                      ");
+      digitalWrite(PWR_ENABLE, HIGH); 
       cp_dutyCycle = _charge_rate::ON_6A; 
       ledcWrite(cp_pwmChannel, (uint32_t) cp_dutyCycle);
       break;
     
     case _cp_state::VENT_CHARGE:
       tft.setCursor(0, 40, 4);
-      tft.printf("\r\nVent Charging !      ");
+      tft.printf("\r\nVent Charging       ");
+      digitalWrite(PWR_ENABLE, HIGH); 
       cp_dutyCycle = _charge_rate::ON_6A; 
       ledcWrite(cp_pwmChannel, (uint32_t) cp_dutyCycle);
       break;
@@ -441,11 +435,13 @@ void loop()
     case _cp_state::NO_POWER:
     case _cp_state::UNKNOWN:
       cp_dutyCycle = _charge_rate::OFF; 
+      digitalWrite(PWR_ENABLE, LOW); 
+      digitalWrite(AUX_ENABLE, LOW); 
       ledcWrite(cp_pwmChannel, (uint32_t) cp_dutyCycle);
       break;
 
     default:
-      printf("CP Unknown State\r\n");
+      Serial0.printf("CP Unknown State\r\n");
       cp_dutyCycle = _charge_rate::OFF; 
       ledcWrite(cp_pwmChannel, (uint32_t) cp_dutyCycle);
       break;
