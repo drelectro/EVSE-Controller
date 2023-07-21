@@ -104,8 +104,8 @@
                 .then(data => {
 
                     document.getElementById('cpVoltageStatus').innerText = data.cpVoltage + ' V';
-                    document.getElementById('chargeRateStatus').innerText = data.chargeCurrent + ' mA';
-                    document.getElementById('pwmDutyCycleStatus').innerText = data.cpPWM;
+                    document.getElementById('chargeRateStatus').innerText = data.chargeCurrent + ' A';
+                    document.getElementById('pwmDutyCycleStatus').innerText = data.cpPWM + ' %';
                     document.getElementById('stateStatus').innerText = data.system_state;
 
                     /*
@@ -121,11 +121,17 @@
                 console.error('Error fetching device status:', error);
                 });
             }   
-
+            
             function onSetCurrentClick(){
                 const chargeRateInputBox = document.getElementById('chargeRateInputBox');
                 const setpoint = chargeRateInputBox.value;
                 callApi(`api/setParameter?setChargeCurrent=${encodeURIComponent(setpoint)}`);
+            }
+
+            function onCurrentOptionChange() {
+                const selectElement = document.getElementById('currentOptions');
+                const selectedValue = selectElement.value;
+                callApi(`api/setParameter?setChargeCurrent=${encodeURIComponent(selectedValue)}`);
             }
 
             function onSwitchSupplyClick() {
@@ -173,19 +179,35 @@
                 <div>
                 <p>CP Voltage: <span id="cpVoltageStatus">N/A</span></p>
                 <p>State: <span id="stateStatus">N/A</span></p>
-                <p>Charge Rate: <span id="chargeRateStatus">N/A</span> A</p>
-                <p>PWM Duty Cycle: <span id="pwmDutyCycleStatus">N/A</span> %</p>
+                <p>Charge Rate: <span id="chargeRateStatus">N/A</span></p>
+                <p>PWM Duty Cycle: <span id="pwmDutyCycleStatus">N/A</span></p>
                 </div>
             </div>
         </div>
 
         <div class="input-group">
+            <!--
             <label for="chargeRateInputBox">Current Set (A):</label>
             <input id="chargeRateInputBox" type="text" value="100" style="width: 100px;">
             <button id="setCurrentButton" class="smallbutton" onclick="onSetCurrentClick()">Set</button>
+            -->
+
+            <label for="currentOptions">Select Charge Current:</label>
+            <select id="currentOptions" onchange="onCurrentOptionChange()">
+                <option value="-">---</option>
+                <option value="0">OFF</option>
+                <option value="6">6A</option>
+                <option value="10">10A</option>
+                <option value="15">15A</option>
+                <option value="18">18A</option>
+                <option value="24">24A</option>
+                <option value="30">30A</option>
+            </select>
         </div>
 
+        <!--
         <button id="switchSupplyButton" class="button" onclick="onSwitchSupplyClick()">Select CL1 supply</button>
+        -->
 
     </body>
 </html>

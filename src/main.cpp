@@ -49,15 +49,23 @@ const int cp_pwmChannel = 0;
 const int cp_pwmFrequency = 1000;
 const int cp_pwmResolution = 8;
 
+#define CP_AVERAGE_COUNT 10
+
 uint32_t cp_activeVoltageInt;
 bool cp_activeVoltageReady = false;
+uint32_t cp_voltageAccumulator;
+uint32_t cp_voltageCount;
 float cp_activeVoltage;
 float cp_Voltage;
 float cp_statVoltage;
 
-const float cp_filterAlpha = 0.2;
+const float v_scale = 253;
+
+//const float cp_filterAlpha = 0.2;
 
 bool adc_calibrated;
+
+int unknown_count;
 
 
 
@@ -95,8 +103,9 @@ static bool adc_calibration_init(void)
 void IRAM_ATTR handlePwmStartInterrupt() {
   //digitalWrite(AUX_ENABLE, HIGH); 
 
-  int adc_raw = adc1_get_raw(ADC1_CHANNEL_8);
-  cp_activeVoltageInt = esp_adc_cal_raw_to_voltage(adc_raw, &adc1_chars);
+  //int adc_raw = adc1_get_raw(ADC1_CHANNEL_8);
+  //cp_activeVoltageInt = esp_adc_cal_raw_to_voltage(adc_raw, &adc1_chars);
+  cp_activeVoltageInt = adc1_get_raw(ADC1_CHANNEL_8);
   cp_activeVoltageReady = true;
 
   //digitalWrite(AUX_ENABLE, LOW);
@@ -131,6 +140,8 @@ void setup(void) {
 
   pinMode(CP_SENSE, INPUT);       // CP voltage monitor input
   cp_Voltage = 0;
+  cp_voltageAccumulator = 0;
+  cp_voltageCount = 0;
   adc1_config_width(ADC_WIDTH_BIT_12);
   adc1_config_channel_atten(ADC1_CHANNEL_8, ADC_ATTEN_DB_11);
   
@@ -153,6 +164,8 @@ void setup(void) {
   cp_state = _cp_state::NO_POWER;
   system_state = _system_state::WAIT_VEHICLE;
   wifi_state = _wifi_state::IDLE;
+
+  unknown_count = 0;
 
   
   Serial0.println("Initiaslised");
@@ -179,9 +192,12 @@ void handleApiGetStatus() {
 
   DynamicJsonDocument doc(256);
 
-  doc["cpVoltage"] = String(cp_statVoltage);
-  doc["chargeRateStatus"] = "test1"; //String(runtimeState.last_i);
-  doc["pwmDutyCycleStatus"] = "test2"; //String(runtimeState.wh_accumulator/3600);
+  float cpv = cp_statVoltage - 1656;  // 1656 = 0V
+  cpv *= 7.7;  // Multiplier
+  cpv /= 1000; // mV to V
+
+  doc["cpVoltage"] = String(cpv, 0);
+  doc["cpPWM"] = String(((uint32_t)cp_dutyCycle / 256.0) * 100, 0);; 
 
   //enum class _cp_state {STANDBY, VEHICLE_DETECTED, CHARGE, VENT_CHARGE, NO_POWER, FAULT, UNKNOWN} cp_state;
   switch (cp_state){
@@ -208,6 +224,33 @@ void handleApiGetStatus() {
       break;
   }
 
+  //enum class _charge_rate {OFF = 255, ON_6A = 26, ON_10A = 41, ON_15A = 64, ON_18A = 77, ON_24A = 102, ON_30A = 128} cp_dutyCycle;
+  switch (cp_dutyCycle){
+    case _charge_rate::OFF:
+      doc["chargeCurrent"] = "0";
+      break;
+    case _charge_rate::ON_6A:
+      doc["chargeCurrent"] = "6";
+      break;
+    case _charge_rate::ON_10A:
+      doc["chargeCurrent"] = "10";
+      break;
+    case _charge_rate::ON_15A:
+      doc["chargeCurrent"] = "15";
+      break;
+    case _charge_rate::ON_18A:
+      doc["chargeCurrent"] = "18";
+      break;
+    case _charge_rate::ON_24A:
+      doc["chargeCurrent"] = "24";
+      break;
+    case _charge_rate::ON_30A:
+      doc["chargeCurrent"] = "30";
+      break;
+
+    
+  }
+
 
   String jsonResponse;
   serializeJson(doc, jsonResponse);
@@ -228,6 +271,28 @@ void handleApiSetParameter(){
         digitalWrite(AUX_ENABLE, LOW); 
       if (webserver.arg(i) == "AUX")
         digitalWrite(AUX_ENABLE, HIGH); 
+    }
+
+    if (webserver.argName(i) == "setChargeCurrent"){
+
+      if ((cp_state == _cp_state::CHARGE) || (cp_state == _cp_state::VENT_CHARGE)){
+
+        if (webserver.arg(i) == "0") {
+          cp_dutyCycle = _charge_rate::OFF; 
+          digitalWrite(PWR_ENABLE, LOW); 
+        }
+        
+        else if (webserver.arg(i) == "6") cp_dutyCycle = _charge_rate::ON_6A;
+        else if (webserver.arg(i) == "10") cp_dutyCycle = _charge_rate::ON_10A;
+        else if (webserver.arg(i) == "15") cp_dutyCycle = _charge_rate::ON_15A;
+
+        ledcWrite(cp_pwmChannel, (uint32_t) cp_dutyCycle);
+
+        if (cp_dutyCycle != _charge_rate::OFF){
+          digitalWrite(PWR_ENABLE, HIGH); 
+        }
+      }
+
     }
 
     /*
@@ -300,16 +365,22 @@ bool get_cp_state()
   //cp_Voltage = cp_filterAlpha * (float)analogReadMilliVolts(CP_SENSE) +
   //                    (1 - cp_filterAlpha) * cp_Voltage;
 
-  int adc_raw = adc1_get_raw(ADC1_CHANNEL_8);
-  cp_Voltage = (float)esp_adc_cal_raw_to_voltage(adc_raw, &adc1_chars);
-
   if (cp_activeVoltageReady){
     cp_activeVoltageReady = false;
 
     //cp_activeVoltage = cp_filterAlpha * (float)cp_activeVoltageInt +
     //                   (1 - cp_filterAlpha) * cp_activeVoltage;
 
-    cp_activeVoltage = (float)cp_activeVoltageInt;
+      cp_voltageAccumulator += cp_activeVoltageInt;
+      cp_voltageCount ++;
+
+      if (cp_voltageCount == CP_AVERAGE_COUNT){
+        cp_activeVoltage = (float)esp_adc_cal_raw_to_voltage((cp_voltageAccumulator / cp_voltageCount), &adc1_chars);
+        cp_voltageCount = 0;
+        cp_voltageAccumulator = 0;
+      }
+
+    
   }
   else{
     cp_activeVoltage = 0;
@@ -318,15 +389,27 @@ bool get_cp_state()
   //Serial0.printf("CP V = %.0f act = %.0f %d\r\n", cp_Voltage, cp_activeVoltage, cp_state);
  
 
-  if ((cp_state == _cp_state::CHARGE) || (cp_state == _cp_state::VENT_CHARGE)){
+  if ((cp_state == _cp_state::VEHICLE_DETECTED) || (cp_state == _cp_state::CHARGE) || (cp_state == _cp_state::VENT_CHARGE)){
     v = cp_activeVoltage;
 
     if (v == 0){
       return false;
     }
   }
-  else
+  else{
+    cp_voltageAccumulator += adc1_get_raw(ADC1_CHANNEL_8);
+    cp_voltageCount ++;
+
+      if (cp_voltageCount == CP_AVERAGE_COUNT){
+        cp_Voltage = (float)esp_adc_cal_raw_to_voltage((cp_voltageAccumulator / CP_AVERAGE_COUNT), &adc1_chars);
+        cp_voltageCount = 0;
+        cp_voltageAccumulator = 0;
+      }
+
+    
     v = cp_Voltage;
+
+  }    
 
   cp_statVoltage = v;
 
@@ -350,24 +433,27 @@ bool get_cp_state()
       state_changed = true;
       cp_state = _cp_state::STANDBY;
       tft.printf("Standby                  ");
+      unknown_count = 0;
     }
   }
 
-  // VEHICLE_DETECTED, CHARGE, VENT_CHARGE, NO_POWER, FAULT}
+  // VEHICLE_DETECTED
   else if ((v >= 2760.0) && (v <= 3010.0)){
     if (cp_state != _cp_state::VEHICLE_DETECTED){
       state_changed = true;
       cp_state = _cp_state::VEHICLE_DETECTED;
       tft.printf("Vehicle detected");
+      unknown_count = 0;
     }
   }
 
-  // CHARGE, VENT_CHARGE, NO_POWER, FAULT}
+  // CHARGE
   else if ((v >= 2365.0) && (v <= 2620.0)){
     if (cp_state != _cp_state::CHARGE){
       state_changed = true;
       cp_state = _cp_state::CHARGE;
       tft.printf("Ready           ");
+      unknown_count = 0;
     }
   }
 
@@ -377,6 +463,7 @@ bool get_cp_state()
       state_changed = true;
       cp_state = _cp_state::VENT_CHARGE;
       tft.printf("Ready-v         ");
+      unknown_count = 0;
     }
   }
 
@@ -392,9 +479,15 @@ bool get_cp_state()
   // Undefined 
   else{
     if (cp_state != _cp_state::UNKNOWN){
-      state_changed = true;
-      cp_state = _cp_state::UNKNOWN;
-      //tft.printf("CP Invalid");
+
+      if (unknown_count >= 50)
+      {
+        state_changed = true;
+        cp_state = _cp_state::UNKNOWN;
+        tft.printf("CP Invalid");
+      }
+      else
+        unknown_count ++;
     }
   }
   
@@ -413,24 +506,37 @@ void loop()
 
     switch (cp_state)
     {
+
+    // Vehicle Detected  
+    // Set CP pulse width to desired charge rate
+    // But don't apply power yet
+    case _cp_state::VEHICLE_DETECTED:
+      tft.setCursor(0, 40, 4);
+      tft.printf("\r\nDetected                      ");
+      cp_dutyCycle = _charge_rate::ON_10A;  
+      digitalWrite(PWR_ENABLE, LOW);        
+      ledcWrite(cp_pwmChannel, (uint32_t) cp_dutyCycle);
+      break;
+
+    // Vehicle ready, apply power
     case _cp_state::CHARGE:
       tft.setCursor(0, 40, 4);
       tft.printf("\r\nCharging                      ");
-      digitalWrite(PWR_ENABLE, HIGH); 
-      cp_dutyCycle = _charge_rate::ON_6A; 
+      digitalWrite(PWR_ENABLE, HIGH);       
+      cp_dutyCycle = _charge_rate::ON_10A; 
       ledcWrite(cp_pwmChannel, (uint32_t) cp_dutyCycle);
       break;
-    
+
+    // Vehicle ready, apply power
     case _cp_state::VENT_CHARGE:
       tft.setCursor(0, 40, 4);
       tft.printf("\r\nVent Charging       ");
       digitalWrite(PWR_ENABLE, HIGH); 
-      cp_dutyCycle = _charge_rate::ON_6A; 
+      cp_dutyCycle = _charge_rate::ON_10A; 
       ledcWrite(cp_pwmChannel, (uint32_t) cp_dutyCycle);
       break;
 
     case _cp_state::STANDBY:
-    case _cp_state::VEHICLE_DETECTED:
     case _cp_state::FAULT:
     case _cp_state::NO_POWER:
     case _cp_state::UNKNOWN:
