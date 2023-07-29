@@ -3,6 +3,10 @@
 #include <WebServer.h>
 #include <SPIFFS.h>
 
+#include <ESPmDNS.h>
+#include <WiFiUdp.h>
+#include <ArduinoOTA.h>
+
 
 #include <ArduinoJson.h>   
 
@@ -66,7 +70,6 @@ const float v_scale = 253;
 bool adc_calibrated;
 
 int unknown_count;
-
 
 
 static esp_adc_cal_characteristics_t adc1_chars;
@@ -167,7 +170,6 @@ void setup(void) {
 
   unknown_count = 0;
 
-  
   Serial0.println("Initiaslised");
   Serial0.printf("Display = %d x %d\r\n", tft.width(), tft.height());
   Serial0.printf("Font height= %d\r\n", tft.fontHeight());
@@ -199,58 +201,59 @@ void handleApiGetStatus() {
   doc["cpVoltage"] = String(cpv, 0);
   doc["cpPWM"] = String(((uint32_t)cp_dutyCycle / 256.0) * 100, 0);; 
 
-  //enum class _cp_state {STANDBY, VEHICLE_DETECTED, CHARGE, VENT_CHARGE, NO_POWER, FAULT, UNKNOWN} cp_state;
-  switch (cp_state){
-    case _cp_state::STANDBY:
-      doc["system_state"] = String("STANDBY");
-      break;
-    case _cp_state::VEHICLE_DETECTED:
-      doc["system_state"] = String("VEHICLE_DETECTED");
-      break;
-    case _cp_state::CHARGE:
-      doc["system_state"] = String("CHARGE");
-      break;
-    case _cp_state::VENT_CHARGE:
-      doc["system_state"] = String("VENT_CHARGE");
-      break;
-    case _cp_state::NO_POWER:
-      doc["system_state"] = String("NO_POWER");
-      break;
-    case _cp_state::FAULT:
-      doc["system_state"] = String("FAULT");
-      break;
-    default:
-      doc["system_state"] = String("UNKNOWN");
-      break;
-  }
-
   //enum class _charge_rate {OFF = 255, ON_6A = 26, ON_10A = 41, ON_15A = 64, ON_18A = 77, ON_24A = 102, ON_30A = 128} cp_dutyCycle;
+  String charge_rate;
   switch (cp_dutyCycle){
     case _charge_rate::OFF:
-      doc["chargeCurrent"] = "0";
+      charge_rate = "0";
       break;
     case _charge_rate::ON_6A:
-      doc["chargeCurrent"] = "6";
+      charge_rate = "6";
       break;
     case _charge_rate::ON_10A:
-      doc["chargeCurrent"] = "10";
+      charge_rate = "10";
       break;
     case _charge_rate::ON_15A:
-      doc["chargeCurrent"] = "15";
+      charge_rate = "15";
       break;
     case _charge_rate::ON_18A:
-      doc["chargeCurrent"] = "18";
+      charge_rate = "18";
       break;
     case _charge_rate::ON_24A:
-      doc["chargeCurrent"] = "24";
+      charge_rate = "24";
       break;
     case _charge_rate::ON_30A:
-      doc["chargeCurrent"] = "30";
+      charge_rate = "30";
       break;
-
-    
   }
+  doc["chargeCurrent"] = charge_rate;
 
+  //enum class _cp_state {STANDBY, VEHICLE_DETECTED, CHARGE, VENT_CHARGE, NO_POWER, FAULT, UNKNOWN} cp_state;
+  String system_state;
+  switch (cp_state){
+    case _cp_state::STANDBY:
+      system_state = "STANDBY";
+      break;
+    case _cp_state::VEHICLE_DETECTED:
+      system_state = "VEHICLE_DETECTED";
+      break;
+    case _cp_state::CHARGE:
+      system_state = "CHARGE " + charge_rate + "A";
+      break;
+    case _cp_state::VENT_CHARGE:
+      system_state= "VENT_CHARGE"  + charge_rate + "A";
+      break;
+    case _cp_state::NO_POWER:
+      system_state = "NO_POWER";
+      break;
+    case _cp_state::FAULT:
+      system_state = "FAULT";
+      break;
+    default:
+      system_state = "UNKNOWN";
+      break;
+  }
+  doc["system_state"] = system_state;
 
   String jsonResponse;
   serializeJson(doc, jsonResponse);
@@ -275,7 +278,7 @@ void handleApiSetParameter(){
 
     if (webserver.argName(i) == "setChargeCurrent"){
 
-      if ((cp_state == _cp_state::CHARGE) || (cp_state == _cp_state::VENT_CHARGE)){
+      if ((cp_state == _cp_state::CHARGE) || (cp_state == _cp_state::VENT_CHARGE) || (cp_state == _cp_state::VEHICLE_DETECTED)){
 
         if (webserver.arg(i) == "0") {
           cp_dutyCycle = _charge_rate::OFF; 
@@ -285,22 +288,18 @@ void handleApiSetParameter(){
         else if (webserver.arg(i) == "6") cp_dutyCycle = _charge_rate::ON_6A;
         else if (webserver.arg(i) == "10") cp_dutyCycle = _charge_rate::ON_10A;
         else if (webserver.arg(i) == "15") cp_dutyCycle = _charge_rate::ON_15A;
+        else if (webserver.arg(i) == "18") cp_dutyCycle = _charge_rate::ON_18A;
+        else if (webserver.arg(i) == "24") cp_dutyCycle = _charge_rate::ON_24A;
+        else if (webserver.arg(i) == "30") cp_dutyCycle = _charge_rate::ON_30A;
 
         ledcWrite(cp_pwmChannel, (uint32_t) cp_dutyCycle);
 
-        if (cp_dutyCycle != _charge_rate::OFF){
+        if ((cp_dutyCycle != _charge_rate::OFF) && (cp_state != _cp_state::VEHICLE_DETECTED)){
           digitalWrite(PWR_ENABLE, HIGH); 
         }
       }
 
     }
-
-    /*
-    if (webserver.argName(i) == "cutoff"){
-      runtimeState.cut_out_voltage = webserver.arg(i).toFloat();
-      lv_label_set_text_fmt(label_Lower_Status, "Low voltage cutoff = %.2f V", runtimeState.cut_out_voltage);
-    }
-    */
 
   }
 
@@ -339,11 +338,55 @@ void do_WiFi()
         //lv_label_set_text(label_Status, "Warning SPIFFS not mounted !");
       }
 
+      // Port defaults to 3232
+      // ArduinoOTA.setPort(3232);
+
+      // Hostname defaults to esp3232-[MAC]
+      // ArduinoOTA.setHostname("myesp32");
+
+      // No authentication by default
+      // ArduinoOTA.setPassword("admin");
+
+      ArduinoOTA
+        .onStart([]() {
+          String type;
+          if (ArduinoOTA.getCommand() == U_FLASH)
+            type = "sketch";
+          else{ // U_SPIFFS
+            type = "filesystem";
+            SPIFFS.end();
+          }
+
+          tft.setCursor(0, 160, 4);
+          tft.println("Updating " + type);
+        })
+        .onEnd([]() {
+          tft.setCursor(0, 200, 4);
+          tft.println("Update complete");
+        })
+        .onProgress([](unsigned int progress, unsigned int total) {
+          tft.setCursor(0, 180, 4);
+          tft.printf("Progress: %u%%", (progress / (total / 100)));
+        })
+        .onError([](ota_error_t error) {
+          tft.setCursor(0, 200, 4);
+          tft.printf("Error[%u]: ", error);
+          if (error == OTA_AUTH_ERROR) tft.println("Auth Failed");
+          else if (error == OTA_BEGIN_ERROR) tft.println("Begin Failed");
+          else if (error == OTA_CONNECT_ERROR) tft.println("Connect Failed");
+          else if (error == OTA_RECEIVE_ERROR) tft.println("Receive Failed");
+          else if (error == OTA_END_ERROR) tft.println("End Failed");
+          delay (1000);
+        });
+
+      ArduinoOTA.begin();
+
       wifi_state = _wifi_state::RUN_WEBSERVER;
       break;
 
   case _wifi_state::RUN_WEBSERVER:
     webserver.handleClient();
+    ArduinoOTA.handle();
     break;
 
     default:
@@ -388,8 +431,10 @@ bool get_cp_state()
 
   //Serial0.printf("CP V = %.0f act = %.0f %d\r\n", cp_Voltage, cp_activeVoltage, cp_state);
  
-
-  if ((cp_state == _cp_state::VEHICLE_DETECTED) || (cp_state == _cp_state::CHARGE) || (cp_state == _cp_state::VENT_CHARGE)){
+  // If we're in any state where the PWM is active then use the cp_activeVoltage, which is sampled on each PWN high phase
+  // If we're in any other state or the charge rate is 0 then the PWM duty cycle is 100% so we sample CP directly.
+  if (((cp_state == _cp_state::VEHICLE_DETECTED) || (cp_state == _cp_state::CHARGE) || (cp_state == _cp_state::VENT_CHARGE))
+      && (cp_dutyCycle != _charge_rate::OFF)){
     v = cp_activeVoltage;
 
     if (v == 0){
@@ -513,7 +558,7 @@ void loop()
     case _cp_state::VEHICLE_DETECTED:
       tft.setCursor(0, 40, 4);
       tft.printf("\r\nDetected                      ");
-      cp_dutyCycle = _charge_rate::ON_10A;  
+      //cp_dutyCycle = _charge_rate::OFF;  
       digitalWrite(PWR_ENABLE, LOW);        
       ledcWrite(cp_pwmChannel, (uint32_t) cp_dutyCycle);
       break;
@@ -523,7 +568,7 @@ void loop()
       tft.setCursor(0, 40, 4);
       tft.printf("\r\nCharging                      ");
       digitalWrite(PWR_ENABLE, HIGH);       
-      cp_dutyCycle = _charge_rate::ON_10A; 
+      //cp_dutyCycle = _charge_rate::OFF; 
       ledcWrite(cp_pwmChannel, (uint32_t) cp_dutyCycle);
       break;
 
@@ -532,7 +577,7 @@ void loop()
       tft.setCursor(0, 40, 4);
       tft.printf("\r\nVent Charging       ");
       digitalWrite(PWR_ENABLE, HIGH); 
-      cp_dutyCycle = _charge_rate::ON_10A; 
+      //cp_dutyCycle = _charge_rate::OFF; 
       ledcWrite(cp_pwmChannel, (uint32_t) cp_dutyCycle);
       break;
 
@@ -555,7 +600,7 @@ void loop()
   }
 
   do_WiFi();
-  
+
   delay(10);
 }
 
